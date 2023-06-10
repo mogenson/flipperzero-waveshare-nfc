@@ -1,0 +1,23 @@
+cargo-features = ["different-binary-name"]
+
+[package]
+name = "flipper-nfc-waveshare"
+version = "0.1.0"
+edition = "2021"
+autobins = false
+autoexamples = false
+autotests = false
+autobenches = false
+
+[[bin]]
+name = "flipper-nfc-waveshare"
+filename = "waveshare.fap"
+bench = false
+test = false
+
+[dependencies]
+ufmt = "0.2.0"
+flipperzero = { path = "../flipperzero/crates/flipperzero", features = ["alloc"] }
+flipperzero-sys = { path = "../flipperzero/crates/sys" }
+flipperzero-rt = { path = "../flipperzero/crates/rt" }
+flipperzero-alloc = { path = "../flipperzero/crates/alloc" }
