@@ -10,16 +10,21 @@ extern crate flipperzero_alloc;
 extern crate flipperzero_rt;
 
 use flipperzero::dialogs::{DialogFileBrowserOptions, DialogsApp};
-use flipperzero::furi::{string::FuriString, thread};
+use flipperzero::furi::string::FuriString;
+use flipperzero::io::*;
 use flipperzero::println;
+use flipperzero::storage::{File, OpenOptions};
 use flipperzero_rt::{entry, manifest};
 use flipperzero_sys as sys;
 
 use alloc::boxed::Box;
-use core::ffi::{c_void, CStr};
+use core::ffi::{c_char, c_void, CStr};
 use core::ptr::{null_mut, NonNull};
-use sys::{c_string, furi_delay_ms};
+use sys::c_string;
 use ufmt::uwrite;
+
+mod tag;
+use tag::TagSize;
 
 // Define the FAP Manifest for this application
 manifest!(
@@ -37,29 +42,11 @@ enum AppView {
     Widget = 1,
 }
 
-#[derive(Clone, Copy)]
-enum TagSize {
-    // must match location in menu
-    TwoNine = 0,
-    FourTwo = 1,
-    SevenFive = 2,
-}
-
-impl TagSize {
-    pub fn text(&self) -> *const core::ffi::c_char {
-        match self {
-            Self::TwoNine => c_string!("2.9\""),
-            Self::FourTwo => c_string!("4.2\""),
-            Self::SevenFive => c_string!("7.5\""),
-        }
-    }
-}
-
 enum AppEvent {
     SetTagSize(TagSize),
     OpenImage,
     WriteTag,
-    QuitThread,
+    WaitForTag,
 }
 
 impl AppEvent {
@@ -67,7 +54,7 @@ impl AppEvent {
         match self {
             Self::OpenImage => 1, // needs to match location in menu
             Self::WriteTag => 2,  // needs to match location in menu
-            Self::QuitThread => 3,
+            Self::WaitForTag => 3,
             Self::SetTagSize(TagSize::TwoNine) => 4,
             Self::SetTagSize(TagSize::FourTwo) => 5,
             Self::SetTagSize(TagSize::SevenFive) => 6,
@@ -83,7 +70,7 @@ struct App {
     tag_size_menu_item: Option<NonNull<sys::VariableItem>>,
     file_path: Option<FuriString>,
     file_menu_item: Option<NonNull<sys::VariableItem>>,
-    join_handle: Option<thread::JoinHandle>,
+    file: Option<File>,
 }
 
 impl App {
@@ -96,7 +83,7 @@ impl App {
             tag_size_menu_item: None,
             file_path: None,
             file_menu_item: None,
-            join_handle: None,
+            file: None,
         }
     }
 }
@@ -108,6 +95,21 @@ impl Drop for App {
             sys::variable_item_list_free(self.variable_item_list.as_ptr());
             sys::widget_free(self.widget.as_ptr());
         }
+    }
+}
+
+fn update_widget(widget: *mut sys::Widget, message: *const c_char) {
+    unsafe {
+        sys::widget_reset(widget);
+        sys::widget_add_string_element(
+            widget,
+            64,
+            32,
+            sys::Align_AlignCenter,
+            sys::Align_AlignCenter,
+            sys::Font_FontPrimary,
+            message,
+        );
     }
 }
 
@@ -237,7 +239,7 @@ pub unsafe extern "C" fn custom_event_callback(context: *mut c_void, event: u32)
             let mut dialogs_app = DialogsApp::open();
             let file_browser_options = DialogFileBrowserOptions::new()
                 .set_hide_dot_files(true)
-                .set_extension(CStr::from_bytes_until_nul(b"txt\0").unwrap())
+                .set_extension(CStr::from_bytes_until_nul(b"pbm\0").unwrap())
                 .set_hide_ext(false);
             (*app).file_path = dialogs_app.show_file_browser(None, Some(&file_browser_options));
             match &(*app).file_path {
@@ -260,33 +262,73 @@ pub unsafe extern "C" fn custom_event_callback(context: *mut c_void, event: u32)
         }
         evt if evt == AppEvent::WriteTag.to_int() => {
             println!("write tag event received");
-            let widget = (*app).widget.as_ptr() as usize; // lol fuck safety
-            sys::view_dispatcher_switch_to_view(
-                (*app).view_dispatcher.as_ptr(),
-                AppView::Widget as u32,
-            );
+            if let Some(file_path) = &(*app).file_path {
+                sys::view_dispatcher_switch_to_view(
+                    (*app).view_dispatcher.as_ptr(),
+                    AppView::Widget as u32,
+                );
 
-            (*app).join_handle = Some(thread::spawn(move || {
-                let mut percent = FuriString::from("  0%");
-                let mut i = 0;
-                while thread::get_flags() != AppEvent::QuitThread.to_int() {
-                    percent.clear();
-                    let _ = uwrite!(percent, "{}%", i);
-                    i += 1;
-                    sys::widget_reset(widget as *mut sys::Widget);
-                    sys::widget_add_string_element(
-                        widget as *mut sys::Widget,
-                        128 / 2,
-                        64 / 2,
-                        sys::Align_AlignCenter,
-                        sys::Align_AlignCenter,
-                        sys::Font_FontPrimary,
-                        percent.as_c_str().as_ptr(),
-                    );
-                    furi_delay_ms(500);
+                if sys::furi_hal_nfc_is_busy() {
+                    println!("nfc is busy");
+                    update_widget((*app).widget.as_ptr(), c_string!("Can't start NFC"));
+                    return true;
                 }
-                0
-            }));
+
+                (*app).file = Some(
+                    match OpenOptions::new()
+                        .read(true)
+                        .open_existing(true)
+                        .open(file_path.as_c_str())
+                    {
+                        Ok(mut file) => {
+                            file.seek(SeekFrom::Start(11)).unwrap();
+                            file
+                        }
+                        Err(e) => {
+                            println!("couldn't open file: {}", e);
+                            update_widget((*app).widget.as_ptr(), c_string!("Can't open file"));
+                            return true;
+                        }
+                    },
+                );
+
+                update_widget((*app).widget.as_ptr(), c_string!("waiting for tag"));
+                sys::view_dispatcher_send_custom_event(
+                    (*app).view_dispatcher.as_ptr(),
+                    AppEvent::WaitForTag.to_int(),
+                );
+            }
+        }
+        evt if evt == AppEvent::WaitForTag.to_int() => {
+            let mut dev_data = sys::FuriHalNfcDevData {
+                type_: sys::FuriHalNfcType_FuriHalNfcTypeA,
+                interface: sys::FuriHalNfcInterface_FuriHalNfcInterfaceRf,
+                uid_len: 0,
+                uid: Default::default(),
+                cuid: 0,
+                atqa: Default::default(),
+                sak: 0,
+            };
+
+            sys::furi_hal_nfc_exit_sleep();
+
+            let timeout = 300;
+            if sys::furi_hal_nfc_detect(
+                &mut dev_data as *mut sys::FuriHalNfcDevData,
+                timeout as u32,
+            ) && &dev_data.uid[0..7] == b"WSDZ10m"
+            {
+                println!("found tag");
+                sys::view_dispatcher_stop((*app).view_dispatcher.as_ptr()); // exit back to main()
+                return true;
+            }
+
+            sys::furi_hal_nfc_sleep();
+            sys::furi_delay_ms(50);
+            sys::view_dispatcher_send_custom_event(
+                (*app).view_dispatcher.as_ptr(),
+                AppEvent::WaitForTag.to_int(),
+            ); // run wait for tag event again
         }
         _ => println!("unknown app event {}", event),
     }
@@ -339,6 +381,127 @@ fn do_view_dispatcher(app: *const App) {
     }
 }
 
+fn do_write_tag(file: &mut File, widget: *mut sys::Widget, tag_size: TagSize) -> i32 {
+    unsafe {
+        let timeout = 300;
+        let mut tx_rx = Box::new(sys::FuriHalNfcTxRxContext {
+            tx_data: [0; 512],
+            tx_parity: [0; 64],
+            tx_bits: 0,
+            rx_data: [0; 512],
+            rx_parity: [0; 64],
+            rx_bits: 0,
+            tx_rx_type: sys::FuriHalNfcTxRxType_FuriHalNfcTxRxTypeDefault,
+            nfca_signal: null_mut(),
+            sniff_tx: None,
+            sniff_rx: None,
+            sniff_context: null_mut(),
+        });
+
+        update_widget(widget, c_string!("setting up"));
+
+        for cmd in tag_size.setup() {
+            tx_rx.tx_data[0..cmd.len()].copy_from_slice(&cmd);
+            tx_rx.tx_bits = cmd.len() as u16 * 8;
+            let result =
+                sys::furi_hal_nfc_tx_rx(&mut *tx_rx as *mut sys::FuriHalNfcTxRxContext, timeout);
+            if result == false
+                || tx_rx.rx_bits != 16
+                || tx_rx.rx_data[0] != 0
+                || tx_rx.rx_data[1] != 0
+            {
+                println!("nfc write cmd failure");
+                return -1;
+            }
+        }
+
+        let mut progress = FuriString::new();
+        let (mut buffer, preamble) = tag_size.buffer();
+        let loops = tag_size.loops();
+        for i in 1..=loops {
+            let Ok(_) = file.read(&mut buffer[preamble..]) else { return -1; };
+            tx_rx.tx_data[0..preamble].copy_from_slice(&buffer[0..preamble]);
+            for (dst, src) in tx_rx.tx_data[preamble..buffer.len()]
+                .iter_mut()
+                .zip(&buffer[preamble..buffer.len()])
+            {
+                *dst = !(*src);
+            }
+            tx_rx.tx_bits = buffer.len() as u16 * 8;
+            let result =
+                sys::furi_hal_nfc_tx_rx(&mut *tx_rx as *mut sys::FuriHalNfcTxRxContext, timeout);
+
+            if result == false
+                || tx_rx.rx_bits != 16
+                || tx_rx.rx_data[0] != 0
+                || tx_rx.rx_data[1] != 0
+            {
+                println!("nfc write data failure");
+                return -1;
+            }
+
+            progress.clear();
+            let _ = uwrite!(progress, "chunk {}/{}", i, loops).unwrap();
+            update_widget(widget, progress.as_c_str().as_ptr());
+        }
+
+        for cmd in [tag_size.power_on(), tag_size.refresh()] {
+            tx_rx.tx_data[0..cmd.len()].copy_from_slice(&cmd);
+            tx_rx.tx_bits = cmd.len() as u16 * 8;
+            let result =
+                sys::furi_hal_nfc_tx_rx(&mut *tx_rx as *mut sys::FuriHalNfcTxRxContext, timeout);
+            if result == false
+                || tx_rx.rx_bits != 16
+                || tx_rx.rx_data[0] != 0
+                || tx_rx.rx_data[1] != 0
+            {
+                println!("nfc write cmd failure");
+                return -1;
+            }
+        }
+
+        update_widget(widget, c_string!("finishing"));
+
+        let cmd = tag_size.wait();
+        let mut i = 0;
+        loop {
+            tx_rx.tx_data[0..cmd.len()].copy_from_slice(&cmd);
+            tx_rx.tx_bits = cmd.len() as u16 * 8;
+            let result =
+                sys::furi_hal_nfc_tx_rx(&mut *tx_rx as *mut sys::FuriHalNfcTxRxContext, timeout);
+            if result == false {
+                println!("nfc write cmd failure");
+                return -1;
+            }
+            if tx_rx.rx_bits == 16 && tx_rx.rx_data[0] == 0xFF && tx_rx.rx_data[1] == 0x00 {
+                println!("image saved");
+                break;
+            }
+            sys::furi_delay_ms(100);
+            i += 1;
+            if i > 50 {
+                println!("nfc save data failure");
+
+                return -1;
+            }
+        }
+
+        update_widget(widget, c_string!("done!"));
+
+        let cmd = tag_size.power_off();
+        tx_rx.tx_data[0..cmd.len()].copy_from_slice(&cmd);
+        tx_rx.tx_bits = cmd.len() as u16 * 8;
+        let result =
+            sys::furi_hal_nfc_tx_rx(&mut *tx_rx as *mut sys::FuriHalNfcTxRxContext, timeout);
+        if result == false || tx_rx.rx_bits != 16 || tx_rx.rx_data[0] != 0 || tx_rx.rx_data[1] != 0
+        {
+            println!("nfc write cmd failure");
+            return -1;
+        }
+    }
+    0
+}
+
 fn main(_args: *mut u8) -> i32 {
     let mut app = Box::new(App::new());
 
@@ -346,15 +509,16 @@ fn main(_args: *mut u8) -> i32 {
 
     do_view_dispatcher(&*app);
 
-    if app.join_handle.is_some() {
-        let join_handle = app.join_handle.take().unwrap();
-        if !join_handle.is_finished() {
-            join_handle
-                .thread()
-                .set_flags(AppEvent::QuitThread.to_int());
-            join_handle.join();
-        }
+    if app.file.is_none() {
+        return -1;
     }
 
-    0
+    let mut file = app.file.take().unwrap();
+
+    let ret = do_write_tag(&mut file, app.widget.as_ptr(), app.tag_size);
+    unsafe {
+        sys::furi_hal_nfc_sleep();
+    }
+
+    ret
 }

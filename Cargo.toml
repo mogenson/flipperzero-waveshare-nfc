@@ -21,3 +21,4 @@ flipperzero = { path = "../flipperzero/crates/flipperzero", features = ["alloc"]
 flipperzero-sys = { path = "../flipperzero/crates/sys" }
 flipperzero-rt = { path = "../flipperzero/crates/rt" }
 flipperzero-alloc = { path = "../flipperzero/crates/alloc" }
+next-gen = { version = "0.1.1", default-features = false, features = ["alloc"] }
