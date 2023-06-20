@@ -55,6 +55,14 @@ impl TagSize {
         }
     }
 
+    pub fn header(&self) -> &[u8; 11] {
+        match self {
+            Self::TwoNine => b"P4\n128 296\n",
+            Self::FourTwo => b"P4\n400 300\n",
+            Self::SevenFive => b"P4\n800 480\n",
+        }
+    }
+
     pub fn setup(&self) -> Vec<Vec<u8>> {
         vec![
             vec![CMD, 0x0D],

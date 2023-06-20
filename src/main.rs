@@ -12,8 +12,8 @@ extern crate flipperzero_rt;
 use flipperzero::dialogs::{DialogFileBrowserOptions, DialogsApp};
 use flipperzero::furi::string::FuriString;
 use flipperzero::io::*;
-use flipperzero::println;
 use flipperzero::storage::{File, OpenOptions};
+use flipperzero::{print, println};
 use flipperzero_rt::{entry, manifest};
 use flipperzero_sys as sys;
 
@@ -274,23 +274,30 @@ pub unsafe extern "C" fn custom_event_callback(context: *mut c_void, event: u32)
                     return true;
                 }
 
-                (*app).file = Some(
-                    match OpenOptions::new()
-                        .read(true)
-                        .open_existing(true)
-                        .open(file_path.as_c_str())
-                    {
-                        Ok(mut file) => {
-                            file.seek(SeekFrom::Start(11)).unwrap();
-                            file
-                        }
-                        Err(e) => {
-                            println!("couldn't open file: {}", e);
-                            update_widget((*app).widget.as_ptr(), c_string!("Can't open file"));
-                            return true;
-                        }
-                    },
-                );
+                let Ok(mut file) = OpenOptions::new()
+                    .read(true)
+                    .open_existing(true)
+                    .open(file_path.as_c_str()) else {
+                        println!("couldn't open file");
+                        update_widget((*app).widget.as_ptr(), c_string!("Can't open file"));
+                        return true;
+                    };
+
+                let header = (*app).tag_size.header();
+                let mut buffer: [u8; 11] = Default::default();
+                let Ok(_) = file.read(&mut buffer) else {
+                        println!("couldn't read from file");
+                        update_widget((*app).widget.as_ptr(), c_string!("Can't read file"));
+                        return true;
+                };
+
+                if &buffer != header {
+                    println!("file header doesn't match");
+                    update_widget((*app).widget.as_ptr(), c_string!("Bad file format"));
+                    return true;
+                }
+
+                (*app).file = Some(file);
 
                 update_widget((*app).widget.as_ptr(), c_string!("waiting for tag"));
                 sys::view_dispatcher_send_custom_event(
