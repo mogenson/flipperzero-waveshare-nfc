@@ -13,7 +13,7 @@ use flipperzero::dialogs::{DialogFileBrowserOptions, DialogsApp};
 use flipperzero::furi::string::FuriString;
 use flipperzero::io::*;
 use flipperzero::storage::{File, OpenOptions};
-use flipperzero::{print, println};
+use flipperzero::println;
 use flipperzero_rt::{entry, manifest};
 use flipperzero_sys as sys;
 
